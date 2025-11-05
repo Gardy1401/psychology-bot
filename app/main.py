@@ -26,16 +26,12 @@ EMERGENCY_RESOURCES_HTML = (
     "• Универсальный номер экстренных служб РФ: <b>112</b>\n\n"
     "<i>Звонки анонимны там, где указано. Этот бот не заменяет профессиональную помощь.</i>"
 )
-
-# Ключевые слова высокого риска (самоповреждение/суицид и пр.)
 HIGH_RISK_PATTERNS = [
     r"\bпокончу\b", r"\bсамоуби(й|ться|ваюсь)\b", r"\bне\s*хочу\s*жить\b",
     r"\bубить\s*себя\b", r"\bсвести\s*сч[её]ты\b", r"\bповешусь\b", r"\bрежу\s*себя\b",
     r"\bсуицид\b", r"\bсуицидальн\w+\b"
 ]
 HIGH_RISK_RE = re.compile("|".join(HIGH_RISK_PATTERNS), re.IGNORECASE)
-
-# Токсик-фильтр минимальный (спама/мат в проде расширяйте словарём)
 TOXIC_PATTERNS = [r"\b(ненавижу всех|все уроды)\b"]
 TOXIC_RE = re.compile("|".join(TOXIC_PATTERNS), re.IGNORECASE)
 
@@ -52,11 +48,7 @@ class GigaChatClient:
     def __init__(self):
         self._access_token = None
         self._expires_at = 0  # unix ms
-
-        # Вариант 1: готовый базовый ключ (Base64(client_id:client_secret))
         self._auth_key = os.getenv("GIGACHAT_AUTH_KEY")
-
-        # Вариант 2: client_id + client_secret -> соберём Basic сами
         cid = os.getenv("GIGACHAT_CLIENT_ID")
         csec = os.getenv("GIGACHAT_CLIENT_SECRET")
         if not self._auth_key and cid and csec:
@@ -123,7 +115,7 @@ SYSTEM_PROMPT = (
 DIALOGS: Dict[int, List[Dict[str, str]]] = {}
 MAX_TURNS = 8
 
-gigachat_client = None  # инициализируем в main()
+gigachat_client = None
 
 
 def classify_message(text: str) -> str:
@@ -165,22 +157,18 @@ async def resources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     chat_id = update.effective_chat.id
-
-    # Мгновенная обработка высокого риска
     risk = classify_message(text)
     if risk == "high_risk":
         await update.message.reply_html(
             "Я вижу, что тема очень тяжёлая. Вот проверенные ресурсы помощи:\n\n" + EMERGENCY_RESOURCES_HTML,
             disable_web_page_preview=True,
         )
-        # Дополнительно продолжим диалог мягким вопросом
         followup = "Если безопасно, напиши, где ты сейчас и кто рядом. Я постараюсь помочь."
         await update.message.reply_text(followup)
         return
     if risk == "toxic":
         await update.message.reply_text("Понимаю злость. Постараемся говорить уважительно, так будет продуктивнее.")
 
-    # Диалог с GigaChat
     append_turn(chat_id, "system", SYSTEM_PROMPT) if not DIALOGS.get(chat_id) else None
     append_turn(chat_id, "user", text)
 
@@ -196,7 +184,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3) Обратись к близкому человеку. Если риск усиливается — набери 112 или 051.\n\n"
         )
     append_turn(chat_id, "assistant", reply)
-    # Экранируем HTML для безопасности
     await update.message.reply_html(html.escape(reply))
 
 
@@ -207,7 +194,7 @@ def required_env(name: str) -> str:
     return val
 
 
-async def main():
+def main():
     global gigachat_client
     telegram_token = required_env("TELEGRAM_TOKEN")
     gigachat_client = GigaChatClient()
@@ -219,19 +206,8 @@ async def main():
     app.add_handler(CommandHandler("resources", resources_cmd))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
-    await app.initialize()
-    await app.start()
-    LOGGER.info("Bot started")
-    # выдерживаем вечный цикл до сигнала остановки
-    await app.updater.start_polling()
-    # graceful shutdown
-    await app.updater.idle()
-    await app.stop()
-    await app.shutdown()
-
+    # Блокирующий запуск опроса, корректно останавливается по SIGTERM в Docker
+    app.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    main()
