@@ -1,0 +1,16 @@
+version: "3.9"
+services:
+  helpline-bot:
+    build: .
+    container_name: helpline-bot
+    environment:
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+      # Вариант 1: сразу передайте Base64(client_id:client_secret)
+      # GIGACHAT_AUTH_KEY: "${GIGACHAT_AUTH_KEY}"
+      # Вариант 2: отдельно client_id / client_secret (мы соберём Base64 внутри)
+      GIGACHAT_CLIENT_ID: "${GIGACHAT_CLIENT_ID}"
+      GIGACHAT_CLIENT_SECRET: "${GIGACHAT_CLIENT_SECRET}"
+      GIGACHAT_SCOPE: "GIGACHAT_API_PERS"
+      GIGACHAT_MODEL: "GigaChat-Pro"
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped
