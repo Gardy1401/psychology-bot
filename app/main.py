@@ -27,8 +27,7 @@ EMERGENCY_RESOURCES_HTML = (
 )
 
 SAFETY_FOOTER_HTML = (
-    "\n\n<hr/>"
-    "<b>Если состояние ухудшается или есть риск — звоните 112 или 051, либо см. /resources.</b>"
+    "\n\n<b>Если состояние ухудшается или есть риск — звоните 112 или 051, либо см. /resources.</b>"
 )
 
 # ----------------- Классификация риска -----------------
@@ -63,7 +62,7 @@ IMMINENT_RE = re.compile("|".join(IMMINENT_PATTERNS), re.IGNORECASE)
 HIGH_RISK_RE = re.compile("|".join(HIGH_RISK_PATTERNS), re.IGNORECASE)
 NSSI_RE = re.compile("|".join(NSSI_PATTERNS), re.IGNORECASE)
 THIRD_RE = re.compile("|".join(THIRD_PERSON_PATTERNS), re.IGNORECASE)
-
+MAX_TG_LEN = 4096
 TOXIC_PATTERNS = [r"\b(ненавижу всех|все уроды)\b"]
 TOXIC_RE = re.compile("|".join(TOXIC_PATTERNS), re.IGNORECASE)
 
@@ -161,6 +160,34 @@ class GigaChatClient:
             self._access_token = payload["access_token"]
             self._expires_at = int(payload.get("expires_at", now + 25 * 60 * 1000))
 
+    async def send_html(update: Update, text_html: str):
+        # режем по абзацам, чтобы не рвать теги
+        parts = []
+        current = []
+        size = 0
+        for para in text_html.split("\n\n"):
+            add = (("\n\n" if current else "") + para)
+            if size + len(add) > MAX_TG_LEN:
+                parts.append("".join(current))
+                current = [para]
+                size = len(para)
+            else:
+                current.append(add if current else para)
+                size += len(add)
+        if current:
+            parts.append("".join(current))
+
+        for part in parts:
+            try:
+                await update.message.reply_html(part, disable_web_page_preview=True)
+            except BadRequest as e:
+                # если снова «Can't parse entities…», шлём как plain text
+                try:
+                    await update.message.reply_text(re.sub(r"<[^>]+>", "", part))
+                except Exception:
+                    LOGGER.exception("Failed to send fallback text for part")
+                    raise
+
     async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
         async with aiohttp.ClientSession(timeout=self.TIMEOUT) as session:
             await self._ensure_token(session)
@@ -228,9 +255,9 @@ def append_turn(chat_id: int, role: str, content: str):
         DIALOGS[chat_id] = msgs[-(2 * MAX_TURNS + 2):]
 
 def render_with_footer(reply_text: str) -> str:
-    # Экранируем основной текст, ресурсы отдаём как HTML
+    # основной текст экранируем, футер — валидный HTML из whitelist Telegram
     safe = html.escape(reply_text)
-    return f"{safe}{SAFETY_FOOTER_HTML}"
+    return safe + SAFETY_FOOTER_HTML
 
 # ----------------- Хэндлеры -----------------
 
@@ -289,6 +316,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     append_turn(chat_id, "assistant", reply)
     await update.message.reply_html(render_with_footer(reply), disable_web_page_preview=True)
 
+
+    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+        LOGGER.exception("Unhandled error", exc_info=context.error)
+        if isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "Техническая ошибка при отправке сообщения. Попробуйте еще раз."
+                )
+            except Exception:
+                pass
 # ----------------- Запуск -----------------
 
 def main():
@@ -301,7 +338,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("resources", resources_cmd))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
-
+    app.add_error_handler(on_error)
     app.run_polling()
 
 if __name__ == "__main__":
