@@ -297,7 +297,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not DIALOGS.get(chat_id):
         append_turn(chat_id, "system", SYSTEM_PROMPT)
 
-    # если есть безопасный контекст — вшиваем отдельным системным сообщением один раз
+    # если есть безопасный контекст вшиваем отдельным системным сообщением один раз
     safe = SAFE_CTX.pop(chat_id, None)
     if safe:
         DIALOGS[chat_id].insert(0, {"role": "system", "content": safe})
@@ -317,15 +317,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(render_with_footer(reply), disable_web_page_preview=True)
 
 
-    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-        LOGGER.exception("Unhandled error", exc_info=context.error)
-        if isinstance(update, Update) and update.effective_message:
-            try:
-                await update.effective_message.reply_text(
-                    "Техническая ошибка при отправке сообщения. Попробуйте еще раз."
-                )
-            except Exception:
-                pass
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    LOGGER.exception("Unhandled error", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Техническая ошибка при отправке сообщения. Попробуйте еще раз."
+            )
+        except Exception:
+            pass
 # ----------------- Запуск -----------------
 
 def main():
