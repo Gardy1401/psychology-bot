@@ -160,33 +160,6 @@ class GigaChatClient:
             self._access_token = payload["access_token"]
             self._expires_at = int(payload.get("expires_at", now + 25 * 60 * 1000))
 
-    async def send_html(update: Update, text_html: str):
-        # режем по абзацам, чтобы не рвать теги
-        parts = []
-        current = []
-        size = 0
-        for para in text_html.split("\n\n"):
-            add = (("\n\n" if current else "") + para)
-            if size + len(add) > MAX_TG_LEN:
-                parts.append("".join(current))
-                current = [para]
-                size = len(para)
-            else:
-                current.append(add if current else para)
-                size += len(add)
-        if current:
-            parts.append("".join(current))
-
-        for part in parts:
-            try:
-                await update.message.reply_html(part, disable_web_page_preview=True)
-            except BadRequest as e:
-                # если снова «Can't parse entities…», шлём как plain text
-                try:
-                    await update.message.reply_text(re.sub(r"<[^>]+>", "", part))
-                except Exception:
-                    LOGGER.exception("Failed to send fallback text for part")
-                    raise
 
     async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
         async with aiohttp.ClientSession(timeout=self.TIMEOUT) as session:
@@ -261,6 +234,35 @@ def render_with_footer(reply_text: str) -> str:
 
 # ----------------- Хэндлеры -----------------
 
+async def send_html(update: Update, text_html: str):
+    # режем по абзацам, чтобы не рвать теги
+    parts = []
+    current = []
+    size = 0
+    for para in text_html.split("\n\n"):
+        add = (("\n\n" if current else "") + para)
+        if size + len(add) > MAX_TG_LEN:
+            parts.append("".join(current))
+            current = [para]
+            size = len(para)
+        else:
+            current.append(add if current else para)
+            size += len(add)
+    if current:
+        parts.append("".join(current))
+
+    for part in parts:
+        try:
+            await update.message.reply_html(part, disable_web_page_preview=True)
+        except BadRequest as e:
+            # если снова «Can't parse entities…», шлём как plain text
+            try:
+                await update.message.reply_text(re.sub(r"<[^>]+>", "", part))
+            except Exception:
+                LOGGER.exception("Failed to send fallback text for part")
+                raise
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
         "Привет. Я бот психологической поддержки. Пиши, что беспокоит. "
@@ -283,25 +285,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     label, matched = classify_message(text)
-    if label in ("imminent", "high_risk", "nssi", "third_person"):
-        SAFE_CTX[chat_id] = build_safe_summary(text)  # сохранить мост
-        await update.message.reply_html(CRISIS_PRESETS[...], disable_web_page_preview=True)
-        return
 
+    if label in ("imminent", "high_risk", "nssi", "third_person"):
+        preset = CRISIS_PRESETS.get("imminent" if label == "imminent" else label)
+        if not preset:
+            preset = CRISIS_PRESETS["high_risk"]  # безопасный дефолт
+        await send_html(update, preset)  # <— используем send_html, не reply_html
+        if label in ("imminent", "high_risk"):
+            await send_html(
+                update,
+                "Если безопасно, напишите, где вы сейчас и есть ли кто-то рядом. Я постараюсь поддержать."
+            )
+        LOGGER.info("Crisis handled locally: label=%s matched=%r", label, matched)
+        return
 
     if label == "toxic":
         await update.message.reply_text("Понимаю злость. Давайте говорить уважительно — так будет продуктивнее.")
 
-    # Обычный диалог через GigaChat
-# перед append_turn("user", text) и вызовом gigachat_client.chat(...)
     if not DIALOGS.get(chat_id):
         append_turn(chat_id, "system", SYSTEM_PROMPT)
 
-    # если есть безопасный контекст вшиваем отдельным системным сообщением один раз
-    safe = SAFE_CTX.pop(chat_id, None)
-    if safe:
-        DIALOGS[chat_id].insert(0, {"role": "system", "content": safe})
+    # если используете SAFE_CTX — вставьте сюда
     append_turn(chat_id, "user", text)
+
     try:
         reply = await gigachat_client.chat(DIALOGS[chat_id])
     except Exception as e:
@@ -314,7 +320,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     append_turn(chat_id, "assistant", reply)
-    await update.message.reply_html(render_with_footer(reply), disable_web_page_preview=True)
+    await send_html(update, render_with_footer(reply))
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
