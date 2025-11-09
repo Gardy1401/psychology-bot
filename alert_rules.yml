@@ -1,0 +1,24 @@
+groups:
+  - name: helpline-bot.rules
+    rules:
+      - alert: HelplineAppDown
+        expr: helpline_app_up == 0
+        for: 5m
+        labels:
+          severity: critical
+          job: helpline-bot
+        annotations:
+          summary: "Helpline-bot недоступен"
+          description: "helpline_app_up=0 на {{ $labels.instance }} в течение 5 минут."
+
+  - name: node-exporter.rules
+    rules:
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node_exporter недоступен"
+          description: "Нет метрик от node_exporter на {{ $labels.instance }} в течение 5 минут."
+
