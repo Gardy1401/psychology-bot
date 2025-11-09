@@ -9,10 +9,36 @@ from typing import Dict, List, Tuple
 import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 LOGGER = logging.getLogger("helpline_bot")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
+# ----------------- Метрики -----------------
+APP_UP = Gauge("helpline_app_up", "App up flag")
+UPDATES_TOTAL = Counter("helpline_updates_total", "All incoming updates")
+MSG_TOTAL = Counter(
+    "helpline_messages_total",
+    "Messages by classification",
+    ["label"],
+)
+CRISIS_HANDLED = Counter(
+    "helpline_crisis_handled_total",
+    "Crisis messages handled locally",
+    ["label"],
+)
+LLM_REQUESTS = Counter("helpline_llm_requests_total", "LLM requests sent")
+LLM_FAILURES = Counter("helpline_llm_failures_total", "LLM failures", ["reason"])
+LLM_LATENCY = Histogram(
+    "helpline_llm_latency_seconds",
+    "LLM response latency",
+    buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60),
+)
+TG_SEND_FAILURES = Counter("helpline_telegram_send_failures_total", "Telegram send failures", ["reason"])
+MSG_LEN = Histogram("helpline_message_length_chars", "Incoming message length", buckets=(0, 50, 100, 200, 400, 800, 1600, 3200))
+DIALOGS_GAUGE = Gauge("helpline_dialogs_count", "Dialogs tracked in memory")
+ERRORS_TOTAL = Counter("helpline_errors_total", "Unhandled errors")
 # ----------------- Ресурсы и справка -----------------
 
 EMERGENCY_RESOURCES_HTML = (
@@ -226,6 +252,8 @@ def append_turn(chat_id: int, role: str, content: str):
     msgs.append({"role": role, "content": content})
     if len(msgs) > 2 * MAX_TURNS + 2:
         DIALOGS[chat_id] = msgs[-(2 * MAX_TURNS + 2):]
+    DIALOGS_GAUGE.set(len(DIALOGS))
+
 
 def render_with_footer(reply_text: str) -> str:
     # основной текст экранируем, футер — валидный HTML из whitelist Telegram
@@ -255,11 +283,12 @@ async def send_html(update: Update, text_html: str):
         try:
             await update.message.reply_html(part, disable_web_page_preview=True)
         except BadRequest as e:
-            # если снова «Can't parse entities…», шлём как plain text
+            TG_SEND_FAILURES.labels(reason="BadRequest").inc()
             try:
                 await update.message.reply_text(re.sub(r"<[^>]+>", "", part))
-            except Exception:
-                LOGGER.exception("Failed to send fallback text for part")
+            except Exception as e2:
+                TG_SEND_FAILURES.labels(reason=type(e2).__name__).inc()
+                LOGGER.exception("Failed to send fallback text")
                 raise
 
 
@@ -281,21 +310,20 @@ async def resources_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(EMERGENCY_RESOURCES_HTML, disable_web_page_preview=True)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    UPDATES_TOTAL.inc()
     text = update.message.text or ""
+    MSG_LEN.observe(len(text))
     chat_id = update.effective_chat.id
 
     label, matched = classify_message(text)
+    MSG_TOTAL.labels(label=label).inc()
 
     if label in ("imminent", "high_risk", "nssi", "third_person"):
-        preset = CRISIS_PRESETS.get("imminent" if label == "imminent" else label)
-        if not preset:
-            preset = CRISIS_PRESETS["high_risk"]  # безопасный дефолт
-        await send_html(update, preset)  # <— используем send_html, не reply_html
+        CRISIS_HANDLED.labels(label=label).inc()
+        preset = CRISIS_PRESETS.get("imminent" if label == "imminent" else label, CRISIS_PRESETS["high_risk"])
+        await send_html(update, preset)
         if label in ("imminent", "high_risk"):
-            await send_html(
-                update,
-                "Если безопасно, напишите, где вы сейчас и есть ли кто-то рядом. Я постараюсь поддержать."
-            )
+            await send_html(update, "Если безопасно, напишите, где вы сейчас и есть ли кто-то рядом. Я постараюсь поддержать.")
         LOGGER.info("Crisis handled locally: label=%s matched=%r", label, matched)
         return
 
@@ -305,12 +333,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not DIALOGS.get(chat_id):
         append_turn(chat_id, "system", SYSTEM_PROMPT)
 
-    # если используете SAFE_CTX — вставьте сюда
     append_turn(chat_id, "user", text)
 
     try:
+        LLM_REQUESTS.inc()
+        t0 = time.perf_counter()
         reply = await gigachat_client.chat(DIALOGS[chat_id])
+        LLM_LATENCY.observe(time.perf_counter() - t0)
     except Exception as e:
+        LLM_FAILURES.labels(reason=type(e).__name__).inc()
         LOGGER.exception("GigaChat error: %s", e)
         reply = (
             "Не удалось обратиться к модели. Базовая поддержка:\n"
@@ -322,8 +353,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     append_turn(chat_id, "assistant", reply)
     await send_html(update, render_with_footer(reply))
 
-
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    ERRORS_TOTAL.inc()
     LOGGER.exception("Unhandled error", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
@@ -338,7 +369,9 @@ def main():
     global gigachat_client
     telegram_token = required_env("TELEGRAM_TOKEN")
     gigachat_client = GigaChatClient()
-
+    metrics_port = int(os.getenv("METRICS_PORT", "8000"))
+    start_http_server(metrics_port)
+    APP_UP.set(1)
     app = Application.builder().token(telegram_token).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))

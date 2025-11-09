@@ -13,4 +13,7 @@ services:
       GIGACHAT_SCOPE: "GIGACHAT_API_PERS"
       GIGACHAT_MODEL: "GigaChat-Pro"
       LOG_LEVEL: "INFO"
+      METRICS_PORT: "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
